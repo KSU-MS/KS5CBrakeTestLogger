@@ -4,6 +4,17 @@
 #include <SimpleKalmanFilter.h>
 #include <SPI.h>
 #include <mcp_can.h>
+#include <Adafruit_GPS.h>
+#include <Metro.h>
+#include <KSU_GPS.h>
+#include <FlexCAN_T4.h>
+
+FlexCAN_T4<CAN0, RX_SIZE_256, TX_SIZE_16> CAN;
+static CAN_message_t msg_tx;
+Metro GPS_out_timer = Metro(200);
+Metro GPS_parse_timer = Metro(100);
+Metro shonks_out_timer = Metro(100);
+Metro shonks_parse_timer = Metro(1);
 SimpleKalmanFilter shonkFL(1,1,0.01); //front left shonk
 SimpleKalmanFilter shonkFR(1,1,0.01); //front right shonk
 SimpleKalmanFilter shonkRL(1,1,0.01); //rear left shonk
@@ -11,6 +22,11 @@ SimpleKalmanFilter shonkRR(1,1,0.01); //rear right shonk
 
 Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
 //Adafruit_ADS1015 ads;     /* Use this for the 12-bit version */
+
+// Adafruit_GPS GPS(&Serial4);
+void process_gps();
+static bool pending_gps_data;
+MCU_GPS_readings mcu_gps_readings;
 //adc variables
 //space out bt using pins 0 and 3 to avoid short on board
 int16_t adc0,adc1,adc2,adc3;
@@ -21,8 +37,6 @@ int16_t adc0,adc1,adc2,adc3;
 //3-RL
 float volts0,volts1,volts2, volts3;
 //string for writing to SD
-String dataLine;
-unsigned long log_rate=0;
 #ifdef SD_LOGGING
 #ifndef SDCARD_SS_PIN
 const uint8_t SD_CS_PIN = SS;
@@ -65,10 +79,14 @@ char fileName[] = FILE_BASE_NAME "00.txt";
 #endif
 //Stuff for CAN sending
 byte data[8] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
-MCP_CAN CAN0(10);
+// MCP_CAN CAN0(10);
 void setup() {
+  digitalWrite(LED_BUILTIN,HIGH);
   delay(2000);
-
+  // GPS.begin(9600);
+  // GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA); // specify data to be received (minimum + fix)
+  // GPS.sendCommand(PMTK_SET_NMEA_UPDATE_10HZ); // set update rate (10Hz)
+  // GPS.sendCommand(PGCMD_ANTENNA); // report data about antenna
   //picking pin 5
 #ifdef SD_LOGGING
   if (!sd.begin(SD_CONFIG)) {
@@ -99,15 +117,15 @@ void setup() {
   //initialize the ADC
   if (!ads.begin()) {
     Serial.println("Failed to initialize ADS.");
+    digitalWrite(LED_BUILTIN,HIGH);
     while (1);
   }
-  // Initialize MCP2515 running at 16MHz with a baudrate of 500kb/s and the masks and filters disabled.
-  if(CAN0.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ) == CAN_OK) Serial.println("MCP2515 Initialized Successfully!");
-  else Serial.println("Error Initializing MCP2515...");
-  CAN0.setMode(MCP_NORMAL);   // Change to normal mode to allow messages to be transmitted
+    CAN.begin();
+    CAN.setBaudRate(1000000);
 }
 
 void loop() {
+  digitalWrite(LED_BUILTIN,LOW);
   adc0 = ads.readADC_SingleEnded(0);
   adc1 = ads.readADC_SingleEnded(1);
   adc2 = ads.readADC_SingleEnded(2);
@@ -120,8 +138,16 @@ void loop() {
   float timestamp = now/1000;
   char buffer[80];
   sprintf(buffer,"%f,%d,%d,%d,%d\n",timestamp,estimated_FL,estimated_FR,estimated_RL,estimated_RR);
-  if(millis()-log_rate>=100){
-    log_rate=millis();
+  // GPS.read();
+  // if (GPS.newNMEAreceived()) {
+  //   GPS.parse(GPS.lastNMEA());
+  //   pending_gps_data = true;
+  // }
+  // if (GPS_out_timer.check() && pending_gps_data) {
+  //   process_gps();
+  // }
+  if(shonks_out_timer.check()){
+    digitalWrite(LED_BUILTIN,HIGH);
 #ifdef SD_LOGGING
     myFile.println("Time,FrontLeft,FrontRight,RearLeft,RearRight");
     n=sprintf(buffer,"Time\t%f\tLeft wheel\t%f\tRight wheel\t%f\tBrake 1\t%fBrake 2\t%f\n",timestamp,current_rpm2,current_rpm,volts0,volts3);
@@ -130,15 +156,30 @@ void loop() {
     myFile.close();
     Serial.print(buffer);
 #endif
-    memcpy(&data[0],&estimated_FL,sizeof(estimated_FL));
-    memcpy(&data[2],&estimated_FR,sizeof(estimated_FR));
-    memcpy(&data[4],&estimated_RL,sizeof(estimated_RL));
-    memcpy(&data[6],&estimated_RR,sizeof(estimated_RR));
-    byte sndStat = CAN0.sendMsgBuf(0x5ff, 0, 8, data);
-    if(sndStat == CAN_OK){
-      Serial.println("Message Sent Successfully!");
-    } else {
-      Serial.println("Error Sending Message...");
-    }
+    Serial.print(buffer);
+    memcpy(&msg_tx.buf[0],&estimated_FL,sizeof(estimated_FL));
+    memcpy(&msg_tx.buf[2],&estimated_FR,sizeof(estimated_FR));
+    memcpy(&msg_tx.buf[4],&estimated_RL,sizeof(estimated_RL));
+    memcpy(&msg_tx.buf[6],&estimated_RR,sizeof(estimated_RR));
+    msg_tx.id = 0xC5;
+    msg_tx.len = 8;
+    CAN.write(msg_tx);
   }
 }
+// void process_gps() {
+//     mcu_gps_readings.set_latitude(GPS.latitude_fixed);
+//     mcu_gps_readings.set_longitude(GPS.longitude_fixed);
+//     Serial.print("Latitude (x100000): ");
+//     Serial.println(mcu_gps_readings.get_latitude());
+//     Serial.print("Longitude (x100000): ");
+//     Serial.println(mcu_gps_readings.get_longitude());
+//     uint8_t gps_buf[8];
+//     mcu_gps_readings.write(gps_buf);
+//     byte sndStat = CAN0.sendMsgBuf(0xE7, 0, 8, gps_buf);
+//     if(sndStat == CAN_OK){
+//       Serial.println("GPS Message Sent Successfully!");
+//     } else {
+//       Serial.println("Error Sending Message...");
+//     }
+//     pending_gps_data = false;
+// }
